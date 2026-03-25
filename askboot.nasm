@@ -1,6 +1,6 @@
 ;
 ; askboot.nasm: improved ShoeLace MBR bootloader (boot partition picker)
-; extended by pts@fazekas.hu on 2026-03-25
+; extended and optimized by pts@fazekas.hu on 2026-03-25
 ; based on winiboot.x by C. E. Chew 1988-04-25 -- 1990-04-24
 ;
 ; Compile with: nasm -O0 -w+orphan-labels -f bin -o askboot.bin askboot.nasm
@@ -26,7 +26,7 @@
 ; * 2026-03-25: Translated to NASM; Added as an UKH kernel (by pts@fazekas.hu)
 ; * 2026-03-25 v1.1: Moved bootpart earlier, to make room for magic_number; Added detection of the first active partition; <Enter> to boot default
 ;
-; !! Boot using LBA (this would increase the code size sigificantly, we'd have to call int 13h with AH==8).
+; !! feature: Boot using LBA (this would increase the code size sigificantly, we'd have to call int 13h with AH==8).
 ;
 
 bits 16
@@ -35,20 +35,17 @@ cpu 8086
 HARD_DISK       equ 0x80     ; hard disk code
 BUFFER          equ 0x600    ; buffer area above vectors
 BOOTCODE        equ 0x7c00   ; boot code entry
-BOOTSEG         equ 0x7c0    ; boot segment
-TOPOFSTACK      equ 0x7c00   ; top of stack
 TABLE           equ 0x1be    ; partition table offset
 ENTRIES         equ 0x4      ; table entries
-ZERO            equ 0x30     ; ascii '0'
-ONE             equ 0x31     ; ascii '1'
-SPACE           equ 0x20     ; ascii ' '
-ASTERISK        equ 0x2a     ; ascii '*'
-HEXOFFSET       equ 39       ; offset to a-f
-VECTOR          equ 0x00     ; vector segment
+ZERO            equ '0'      ; ascii '0'
+ONE             equ '1'      ; ascii '1'
+SPACE           equ ' '      ; ascii ' '
+ASTERISK        equ '*'      ; ascii '*'
+HEXOFFSET       equ 'a'-'0'-10  ; offset to a-f
 DISK_VECTOR     equ 0x13<<2  ; disk interrupt vector
 TIMEOUT         equ 15*18    ; timeout for keyhit: ~15 seconds
-TIMELO          equ 0x46c    ; timer count low
-TIMEHI          equ 0x46e    ; timer count high
+TIMELO          equ 0x46c    ; BIOS timer count low  word.
+TIMEHI          equ 0x46e    ; BIOS timer count high word.
 
 DEFAULT_PARTITION equ 1  ; Only if no partition is active.
 ENTER_ASCII equ 13  ; The ASCII code for the <Enter> key. The scancode is 28.
@@ -73,43 +70,63 @@ partition       equ 16  ; partition structure size
 ; disk partition table is loaded above the vectors.
 
 _start:
-	mov ax, VECTOR  ; vector segment
+	; !! feature: Preserved ES, DI, DX (DH) for PnP (plug-and-play) BIOS. Restoring ES and DH would make our `jmp far [DISK_VECTOR]' trick fail.
+	;    Preserve DH and ES:DI for full plug-and-play support. https://en.wikipedia.org/wiki/Master_boot_record#MBR_to_VBR_interface
+	;mov bx, es  ; Save original ES.
+	xor ax, ax
 	mov es, ax
+	mov ds, ax
 	cli  ; Work around bug in early 8086 for changing SS:SP unlocked.
 	mov ss, ax
-	mov sp, TOPOFSTACK  ; set up a stack
+	mov sp, BOOTCODE  ; set up to of stack.
 	sti
-	mov ax, BOOTSEG  ; boot segment
-	mov ds, ax
 
-	or dl, HARD_DISK  ; boot hard disk !! Not needed.
-	mov [diskcode], dl  ; code for this hard disk
-
-	mov si, _start  ; move table to low memory
+	;or dl, HARD_DISK  ; boot hard disk. Not needed, DL is already >= 0x80.
+	mov si, sp  ; == BOOTCODE  ; move table to low memory
 	mov di, BUFFER  ; buffer address
-	mov cx, 0x100  ; one sector
+	mov cx, 0x200>>1  ; one sector
 	cld  ; direction is up
-	rep movsw
+	rep movsw  ; This also uses ES == 0.
 
 print_logo:
-	mov bx, m_logo  ; logo banner
+	mov bx, m_logo-_start+BOOTCODE  ; logo banner
 	call puts
 
+get_hdd_geometry:
+	xor di, di  ; Workaround for buggy BIOS. Also the 0 value will be used later.
+	;mov es, di  ; Already set.
+	mov ah, 8  ; Read drive parameters.
+	;mov dl, ...  ; BIOS drive number. Already set.
+	push dx  ; Save DL == BIOS drive number (boot unit). Will be restored (popped) by read_and_jump_to_partition_boot_sector.
+	push dx  ; Save.
+	int 0x13  ; BIOS disk syscall. This call changes ES and DI only if DL is a floppy drive. But it isn't here, because we are running an MBR.
+.disk_error_infinite_loop:
+	jc .disk_error_infinite_loop
+	mov al, dh
+	mov ah, 0
+	inc ax
+	pop dx  ; Restore DL := BIOS drive number; AH := junk.
+	push ax  ; Save HDD head count (1..256).
+	and cx, byte 0x3f  ; Also sets CH := 0.
+	push cx  ; Save HDD sectors-per-track (0..63, 0 is invalid).
+	mov ah, 1  ; Get status of last drive operation. Needed after the AH == 8 call. Takes the drive number in DL.
+	int 0x13  ; BIOS syscall.
+
 find_active:
-	mov si, TABLE+partition*4  ; +active
+	mov si, BOOTCODE+TABLE+partition*4  ; +active
 	mov bx, DEFAULT_PARTITION<<8|4  ; BH := 1 (fallback default partition); BL := first partition to try.
 .next:
 	sub si, byte partition
-	cmp byte [si+active], 0  ; !! Do we have a 0 somewhere?
-	jnl short .maybe_next
+	cmp [si+active], ch  ; CH == 0.
+	jnl short .maybe_next  ; Jump iff the 1<<7 == 0x80 bit in byte [si+active] is not set, i.e. the partition is not active.
 	mov bh, bl  ; BH := first active partition.
 .maybe_next:
 	dec bl
 	jnz short .next
 
 print_partitions:
-	;mov si, TABLE  ; partition table  . Already set.
-	inc bx  ; BL := 1 (partition number to print first); BH := junk.
+	;mov si, BOOTCODE+TABLE  ; partition table  . Already set.
+	mov bl, ONE  ; BL := '1' (partition number to print first); BH := junk.
 .next:
 	mov al, SPACE  ; look for default
 	cmp bl, bh  ; BH == default partition.
@@ -118,26 +135,22 @@ print_partitions:
 .not_default:
 	call putc
 
-	mov di, 10  ; decimal
-	mov cl, 1
 	mov al, bl  ; which partition
-	call putbyte
+	call putc
 
 	push bx  ; remember for later
 
 	mov di, 16  ; hex
-	mov cl, 4  ; field width
-	mov bl, 8  ; fields
+	mov cx, 0x804  ; CL (field width) := 4; CH (field count) := 8.
 
 .firstfields:
 	lodsb
-	call putbyte  ; !! Print CX not as 8+8, but as 10+6(sector) bits.
-	dec bl
+	call putbyte  ; !! feature: Print CX not as 8+8, but as 10(cyl)+6(sec) bits.
+	dec ch
 	jnz short .firstfields
 
 	mov di, 10  ; decimal
-	mov cl, 10  ; field width
-	mov bl, 2  ; fields: start sector (LBA) and sector count.
+	mov cx, 0x20a  ; CL (field width) := 10; CH (field count) := 2 (start sector (LBA) and sector count).
 
 .secondfields:
 	lodsw
@@ -145,15 +158,15 @@ print_partitions:
 	lodsw
 	xchg ax, dx  ; DX:AX := uint32 to print.
 	call putdword
-	dec bl
-	jnz short .secondfields
+	dec ch
+	jnz short .secondfields  ; !! size optimization: Try to do `loop' in CL is 0, swap. Save up to 2 bytes.
 
-	mov bx, m_crlf  ; say newline
+	mov bx, m_crlf-_start+BOOTCODE  ; say newline
 	call puts
 
 	pop bx  ; partition number
 	inc bx
-	cmp bl, ENTRIES
+	cmp bl, ZERO+ENTRIES
 	jbe short .next
 	; Fall through to display_boot_prompt.
 
@@ -162,11 +175,9 @@ display_boot_prompt:
 	dec bx
 	push bx  ; Save default partition in BL+1.
 
-	mov bx, m_boot  ; say we're booting
+	mov bx, m_boot-_start+BOOTCODE  ; say we're booting
 	call puts
 
-	mov ax, VECTOR  ; vector segment
-	mov es, ax  ; address low memory
 	mov bx, TIMEOUT  ; timeout
 
 loadtime:
@@ -199,36 +210,61 @@ keyhit:
 	sub al, ONE  ; convert partition number
 	cmp al, ENTRIES
 	jae short waitkey
-	;pop bx  ; Discard default partition. Not needed.
+	pop bx  ; Discard default partition. Not needed.
 	; Fall through to boot.
 
 boot:  ; Boot the primary partition specified in AL+1 (AL == 0 meaning the first partition).
-	push ax  ; remember partition
 	add al, ONE  ; say which one
 	call putc
-	mov bx, m_crlf
-	call puts
-	pop ax
-
 	mov ah, partition  ; size of each partition
 	mul ah  ; offset
-	add ax, strict word BUFFER+TABLE  ; point at partition table
+	add ax, strict word BUFFER+TABLE-ONE*partition  ; point at partition table
 	xchg si, ax  ; SI := AX (offset of partition entry); AX := junk.
+	mov bx, m_crlf-_start+BOOTCODE
+	call puts
 
-	pushf  ; Fake stack entry for an iret in `int 0x13'.
-	push cs  ; 0.
-	mov bx, BOOTCODE
-	push bx
-	mov dl, 0  ; Self-modifying code: the immediate value has been set above (as [diskcode]).
-diskcode: equ $-1
-	push cs
-	pop ds ; DS := 0. At boot sector boot code (VBR) entry, DS:SI should point to the partition entry, which it now does.
+	mov cx, [si+hidden  ]  ; CX := low  word of partition start sector.
+	mov ax, [si+hidden+2]  ; AX := high word of partition start sector.
+	; Fall through to convert_lba_to_chs.
+
+; Converts sector offset (LBA) value in AX:CX to BIOS-style CHS value in CX
+; and DL (instead of DH). Ruins DH, BX, AX and FLAGS. This is heavily
+; optimized for code size.
+convert_lba_to_chs:
+	xor dx, dx
+	pop bx  ; Restore BX := HDD sectors-per-track.
+	div bx  ; BX == HDD sectors-per-track. We expect it to be in 1..63.
+	xchg cx, ax
+	div bx   ; BX == HDD sectors-per-track. We expect it to be in 1..63.
+	inc dx  ; Like `inc dl`, but 1 byte shorter. Sector numbers start with 1.
+	xchg cx, dx  ; CX := sec value (1..63); CL := sec value (1..63); CH := 0; DX := high word of dividend.
+	pop bx  ; Restore BX := HDD head count.
+	div bx  ; BX == HDD had count. We expect it to be 1..256. AX := cyl value (BIOS allows 0..1023); DX := head value (0..255); DL := head value (0..255); DH := 0; Sets the high 6 bits of AH (and AX) to 0.
+	; BIOS int 13h AH == 2 wants the head value in DH, the low 8
+	; bits of the cyl value in CH, and it wants CL ==
+	; (cyl>>8<<6)|head. Thus we copy DL to DH (cyl value), AL to
+	; CH (low 8 bits of the cyl value), AH to CL (sec value),
+	; and or the 2 bits of AH (high 8 bits of the cyl value)
+	; shifted to CL.
+	mov ch, al
+	times 2 ror ah, 1  ; This works because the high 6 bits of AH were 0.
+	or cl, ah
+	; Fall through to read_and_jump_to_partition_boot_sector.
+
+read_and_jump_to_partition_boot_sector:
+	pop ax  ; Restore AL := BIOS drive number; AH := junk.
+	mov ah, dl  ; AH := head value.
+	xchg dx, ax  ; DH := head value; DL := BIOS drive number; AX := junk.
 	mov ax, 0x201  ; read one sector
-	mov dh, [si+shead]  ; head
-	mov cx, [si+ssector]  ; CL := sector; CH := cylinder ([si+scylinder])
+	mov bx, sp  ; BX := BOOTCODE.
+	;push ds  ; 0
+	;pop es  ; ES := 0. Not needed, it's already 0. We make ES:BX == 0:BOOTCODE point to the read destination buffer.
+	pushf  ; Fake stack entry for an iret in `int 0x13'.
+	push ds  ; 0.
+	push bx
 	jmp far [DISK_VECTOR]  ; read and boot
 	; Not reached. On disk read error, the MBR code (us) is run again.
-	; !! Preserve DH and ES:DI for full plug-and-play support. https://en.wikipedia.org/wiki/Master_boot_record#MBR_to_VBR_interface
+
 
 ; Prints a string onto the console. The string will be pointed to
 ; by DS:BX. Ruins BX, AL.
@@ -242,7 +278,7 @@ puts:
 	jmp short .next
 
 ; Prints the uint8_t in AL, in base DI, padded with spaces to field width CL
-; (must be <=0x7f), onto the console. Ruins AX, DX.
+; (must be <=0x7f), onto the console. Ruins AX, CL, DX.
 putbyte:
 	mov ah, 0
 %if 1
@@ -252,14 +288,14 @@ putbyte:
 	; Fall through to putword.
 
 ; Prints the uint16_t in AX, in base DI, padded with spaces to field width
-; CL (must be <=0x7f), onto the console. Ruins AX, DX.
+; CL (must be <=0x7f), onto the console. Ruins AX, CL, DX.
 putword:
 	xor dx, dx  ; DX := 0.
 %endif
 	; Fall through to putdword.
 
 ; Prints the uint32_t in DX:AX, in base DI, padded with spaces to field
-; width CL (must be <=0x7f), onto the console. Ruins AX, DX.
+; width CL (must be <=0x7f), onto the console. Ruins AX, CL, DX.
 putdword:
 	push bx  ; Save.
 	push cx  ; Save.
@@ -297,17 +333,17 @@ putdword:
 	add al, ZERO
 	; Fall through to putc.
 
-; Prints a character in AL onto the console. Ruins AH.
+; Prints a character in AL onto the console. Ruins AH, BP.
 putc:
-	push bp  ; Save for some buggy BIOS when scrolling.
+	;push bp  ; Save for some buggy BIOS when scrolling. No need to save BP.
 	;push ax
 	push bx
 	xor bx, bx  ; Page and color.
-	mov ah, 0xe  ; write text in teletype mode
+	mov ah, 0xe  ; Write text in teletype mode to console. This ruins BP when scrolling in some buggy BIOS.
 	int 0x10  ; BIOS video syscall: print character to console.
 	pop bx
 	;pop ax
-	pop bp  ; Restore.
+	;pop bp  ; Restore.
 	ret
 
 m_boot:
@@ -318,25 +354,8 @@ m_logo:
 m_crlf:
 	db 13, 10, 0
 
-	times TABLE-2-($-$$) db 0
+	times TABLE-2-($-$$) db '-'
 magic:
 	dw 0  ; Indicate valid partition table. https://github.com/pts/pts-pc-rescuekit kernels check it.
-
-; --- This is a copy of C. E. Chew's HDD partition table. !!
-
-%ifdef PARTITIONS
-	times TABLE-($-$$) db 0
-partitions:
-	db 0x080, 0x001, 0x001, 0x000, 0x004, 0x005, 0x051, 0x097
-	dd 0x00000011, 0x0000a27f
-	db 0x000, 0x000, 0x041, 0x098, 0x040, 0x005, 0x0d1, 0x027
-	dd 0x0000a290, 0x00009f60
-	db 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000
-	dd 0x00000000, 0x00000000
-	db 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000
-	dd 0x00000000, 0x00000000
-boot_signature:
-	dw 0xaa55
-%endif
 
 ; __END__
