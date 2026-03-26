@@ -60,6 +60,16 @@
   %define TIMEOUT_SEC 15  ; Default.
 %endif
 
+%ifdef FALLBACK_PARTITION  ; Fallback default partition number if there is no active primary partition. Must be 1, 2, 3 or 4.
+  %assign FALLBACK_PARTITION FALLBACK_PARTITION
+%else
+  %define FALLBACK_PARTITION 1  ; Default.
+%endif
+%if FALLBACK_PARTITION<1 || FALLBACK_PARTITION>4
+  %error ERROR_BAD_FALLBACK_PARTITION FALLBACK_PARTITION
+  times -1 nop
+%endif
+
 ; ---
 
 bits 16
@@ -84,7 +94,6 @@ DISK_VECTOR     equ 0x13<<2  ; disk interrupt vector
 TIMELO          equ 0x46c    ; BIOS timer count low  word.
 TIMEHI          equ 0x46e    ; BIOS timer count high word.
 
-DEFAULT_PARTITION equ 1  ; Only if no partition is active.
 ENTER_ASCII equ 13  ; The ASCII code for the <Enter> key. The scancode is 28.
 
 ; --- Partition table structure
@@ -244,7 +253,7 @@ get_hdd_geometry:
 
 find_active:
 	mov si, BOOTCODE+TABLE+partition_entry.size*4
-	mov bx, DEFAULT_PARTITION<<8|4  ; BH := 1 (fallback default partition); BL := first partition to try.
+	mov bx, FALLBACK_PARTITION<<8|4  ; BH := 1 (fallback default partition); BL := first partition to try.
 .next:
 	sub si, byte partition_entry.size
 	cmp [si+partition_entry.active], ch  ; CH == 0.
