@@ -20,6 +20,20 @@ BIOS boot. So it runs on most PCs before 2010. Newer PCs tend to use UEFI
 boot instead, some of them still retaining BIOS boot as a configuration
 option, sometimes called as *legacy BIOS* boot.
 
+Here is how a typical askboot prompt looks like in text mode:
+
+```
+AskBoot v1.1 Mar 2026
+
+   Boot Hd Sec Cyl Type Hd Sec Cyl      Base      Size
+ 1   0   2   1   0   4   7  3f   1       126     16443
+ 2   0   2   1   0   4   7  3f   1       126     16443
+ 3   0   2   1   0   4   7  3f   1       126     16443
+*4  80   1   1   0   4   7  3f   1        63     16506
+
+Boot:
+```
+
 The askboot implementation [askboot.nasm](askboot.nasm) is based on WiniBoot
 by C. E. Chew, part of the Minix bootloader ShoeLace 1.0a, released on
 1990-04-24.
