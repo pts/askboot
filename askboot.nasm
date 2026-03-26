@@ -49,6 +49,7 @@
 ;   * Added calculation of boot sector CHS from the LBA (hidden) field of the partition (rather than the shead, ssector and scyliner fields), the former is more reliable.
 ;   * Added preserving of the ES, DI and DH register values for plug-and-play (PnP) BIOS.
 ;   * Improved timeout accuracy.
+;   * Made the display of fields Base (.hidden) and Size (.sectors) wider, so that there is always a space in-between.
 ;   * Heavily optimized the 8086 assembly implementation for size so that all the new functionality fits in.
 ;
 
@@ -222,7 +223,7 @@ m_boot:
 	db 10, 'Boot: ', 0
 m_logo:
 	db 'AskBoot v1.1 Mar 2026', 13, 10, 10
-	db '   Boot Hd Sec Cyl Type Hd Sec Cyl      Base      Size'
+	db '   Boot Hd Sec Cyl Type Hd Sec Cyl       Base       Size'
 m_crlf:
 	db 13, 10, 0
 
@@ -239,11 +240,11 @@ get_hdd_geometry:
 	int 0x13  ; BIOS disk syscall. This call changes ES and DI only if DL is a floppy drive. But it isn't here, because we are running an MBR.
 	; If the HDD is larger than ~7.87 GiB, now DH == 0xfe, CX == 0xffff, which indicates the BIOS maximum.
 .disk_error_infinite_loop:
-	jc .disk_error_infinite_loop
+	jc short .disk_error_infinite_loop
 	mov al, dh
 	mov ah, 0
 	inc ax
-	pop dx  ; Restore DL := BIOS drive number; AH := junk.
+	pop dx  ; Restore DL := BIOS drive number; DH := junk.
 	push dx  ; Save DL == BIOS drive number (boot unit). Will be restored (popped) by read_partition_boot_sector_ebios_lba.
 	push ax  ; Save HDD head count (1..256, most BIOSes never return 256, because early MS-DOS doesn't support it). Will be restored (popped) by read_partition_boot_sector_ebios_lba.
 	and cx, byte 0x3f  ; Also sets CH := 0.
@@ -291,7 +292,7 @@ print_partitions:
 	jnz short .firstfields
 
 	mov di, 10  ; decimal
-	mov cx, 0x20a  ; CL (field width) := 10; CH (field count) := 2 (start sector (LBA) and sector count).
+	mov cx, 0x20b  ; CL (field width) := 11; CH (field count) := 2 (start sector (LBA) and sector count).
 
 .secondfields:
 	lodsw
@@ -376,13 +377,14 @@ read_partition_boot_sector_ebios_lba:
 	pop bp  ; Restore BP := HDD head count.
 	pop dx  ; Restore DL := BIOS drive number; DH := junk.
 	push si  ; Save.
+	mov si, BOOTCODE
+	push si  ; Save BOOTCODE.
 	xor bx, bx
 	;mov ds, bx  ; DS == 0 is already correct.
 	times 2 push bx  ; High dword of partition start sector index (LBA).
 	push ax  ; High word of partition start sector index (LBA).
 	push cx  ; Low  word of partition start sector index (LBA).
 	push es  ; CS == DS == ES == SS == BX == 0.
-	mov si, BOOTCODE
 	push si
 	inc bx
 	push bx  ; Number of sectors to read == 1.
@@ -394,6 +396,7 @@ read_partition_boot_sector_ebios_lba:
 	int 0x13  ; BIOS disk syscall to read a sector (0x200 bytes) to 0x7c00:0. It will keep the data unchanged on read error.
 	pop ax  ; Restore AX := high word of partition start sector index (LBA).
 	lea sp, [si+bx]  ; BX == size of Disk Address Packet (DAP) == 0x10. It doesn't change the FLAGS, needed by `jnc' below.
+	pop bx  ; BX := BOOTCODE.
 	pop si  ; Restore. DS:SI will be used by the boot sector boot code.
 	jnc short jump_to_partition_boot_sector  ; Jump iff sector successfully read using EBIOS LBA.
 	; Fall back to CHS (int 13h AH==2).
@@ -427,7 +430,7 @@ read_partition_boot_sector_chs:
 	mov ah, dl  ; AH := head value.
 	xchg dx, ax  ; DH := head value; DL := BIOS drive number; AH := 2 (read sectors; AL := 1 (read 1 sector).
 	mov ax, 0x201  ; AH := 2 (read sectors); AL := 1 (read 1 sector).
-	mov bx, BOOTCODE
+	;mov bx, BOOTCODE  ; BX is already BOOTCODE, set by `pop bx' in read_partition_boot_sector_ebios_lba above.
 	;mov di, 0
 	;mov es, di  ; ES := 0. Not needed, it's already set. We make ES:BX == 0:BOOTCODE point to the read destination buffer.
 	int 0x13  ; BIOS disk syscall to read a sector (0x200 bytes) to 0x7c00:0. It will keep the data unchanged on read error.
