@@ -1,16 +1,26 @@
 ;
-; askboot.nasm: improved ShoeLace MBR bootloader (boot partition picker)
+; askboot.nasm: interactive, single-sector PC BIOS HDD MBR bootloader (boot partition picker)
 ; extended and optimized by pts@fazekas.hu on 2026-03-25
 ; based on winiboot.x by C. E. Chew 1988-04-25 -- 1990-04-24
 ;
 ; Compile with: nasm -O0 -w+orphan-labels -f bin -o askboot.bin askboot.nasm
 ; Minimum NASM version required: 0.98.39
+; Install to HDD image file hd.img on Linux: dd if=askboot.bin of=hd.img conv=notrunc
 ;
-; This program displays the partition table (only the 4 primary partition),
-; waits for a user keypress with a timeout (~15 seconds), and boots the
-; selected partition. On timeout and upon <Enter>, it boots the default
-; partition, which is the first acive partition, or the first partition if
-; none are active.
+; A typical HDD MBR bootloader picks the first primary partition marked
+; active, loads its boot sector (first 0x200 bytes of the partition) to
+; 0:0x7c00, and jumps to it (in real mode). askboot displays details of all
+; 4 primary partitions, and lets the user pick one to boot by pressing a key
+; (<1> to <4>). If the user presses <Enter> instead, or a timeout of ~15
+; seconds elapses, askboot boots the first primary partition marked as
+; active, or the first partition if none are active.
+;
+; Additional features of askboot: it uses EBIOS LBA (if available), so it
+; can boot from a partition starting after the the first ~7.87 GiB of the
+; HDD; it ignores the CHS values (which are less reliable, especially if the
+; HDD image is moved between emulators or the PC BIOS settings are changed)
+; in the partition table entry, and it always uses the partition start
+; sector index (LBA), even if EBIOS LBA is not available.
 ;
 ; See also
 ; https://en.wikipedia.org/wiki/Master_boot_record#MBR_to_VBR_interface for
@@ -19,7 +29,7 @@
 ;
 ; Edit history:
 ;
-; * 1988-04-25: Created first implementation.
+; * 1988-04-25: C. E. Chew created the first implementation of WiniBoot for ShoeLace.
 ; * 1988-08-19: Adapted to boot off DOS or Minix partition
 ; * 1989-10-06: Converted yo Minix assembler (asld) syntax.
 ; * 1989-10-09: Add default boot partition.
@@ -30,15 +40,16 @@
 ;   * Made sure that the word at file offet MAGIC is 0. Some MBR parsers rely on it.
 ;   * Added detection of the first active partition, and made it default.
 ;   * Added handling <Enter> to boot default partition.
-;   * Added boot using EBIOS LBA (if available), which fixes booting from a partition starting at >~7.87 GiB from the start of the HDD.
+;   * Added boot using EBIOS LBA (if available), which fixes booting from a partition starting after the first ~7.87 GiB of the HDD.
 ;   * Added calculation of boot sector CHS from the LBA (hidden) field of the partition (rather than the shead, ssector and scyliner fields), the former is more reliable.
 ;   * Added preserving of the ES, DI and DH register values for plug-and-play (PnP) BIOS.
+;   * Improved timeout accuracy.
 ;   * Heavily optimized the 8086 assembly implementation for size so that all the new functionality fits in.
 ;
 
 ; --- Configuration
 
-%ifdef TIMEOUT_SEC  ; Timeout (number of seconds) waiting for a user keypress to select the partition to boot. Specify 0 or negative to disable timeout (i.e. to make it infinite).
+%ifdef TIMEOUT_SEC  ; Timeout (number of seconds) waiting for a user keypress to select the partition to boot. Actualy timeout may be a bit larger. Specify 0 or negative to disable timeout (i.e. to make it infinite).
   %assign TIMEOUT_SEC TIMEOUT_SEC
 %else
   %define TIMEOUT_SEC 15  ; Default.
@@ -49,7 +60,6 @@
 bits 16
 cpu 8086
 
-HARD_DISK       equ 0x80     ; hard disk code
 BOOTCODE        equ 0x7c00   ; Boot code entry. 0x200 bytes of MBR of boot sector starts here.
 MBRCODE         equ 0x7a00   ; MBR code entry. 0x200 bytes of MBR starts here, copied from BOOTCODE.
 MAGIC           equ 0x1bc    ; magic value offset
@@ -101,7 +111,6 @@ _start:
 	mov ss, cx
 	mov sp, MBRCODE  ; set up to of stack.
 	sti
-	;or dl, HARD_DISK  ; boot hard disk. Not needed, DL is already >= 0x80.
 
 	push dx  ; Save DH for plug-and-play (PnP) BIOS, and as a side effect, save DL (BIOS drive number). Will be restored (popped) by jump_to_partition_boot_sector.
 	push di  ; Save ES for plug-and-play (PnP) BIOS. Will be restored (popped) by jump_to_partition_boot_sector.
@@ -131,7 +140,7 @@ puts:
 	jz short putc.ret
 	call putc
 	jmp short .next
-	
+
 ; Prints the byte in AL, in base DI, padded with spaces to field width CL
 ; (must be <=0x7f), onto the console. Ruins AX, BX, CX, DX.
 putbyte:
@@ -222,7 +231,7 @@ get_hdd_geometry:
 	inc ax
 	pop dx  ; Restore DL := BIOS drive number; AH := junk.
 	push dx  ; Save DL == BIOS drive number (boot unit). Will be restored (popped) by read_partition_boot_sector_ebios_lba.
-	push ax  ; Save HDD head count (1..256, most BIOSes never return 256, because early MS-DOS doesn't support it). Will be restored (popped) by read_partition_boot_sector_ebios_lba. 
+	push ax  ; Save HDD head count (1..256, most BIOSes never return 256, because early MS-DOS doesn't support it). Will be restored (popped) by read_partition_boot_sector_ebios_lba.
 	and cx, byte 0x3f  ; Also sets CH := 0.
 	push cx  ; Save HDD sectors-per-track (0..63, 0 is invalid). Will be restored (popped) by read_partition_boot_sector_ebios_lba.
 	mov ah, 1  ; Get status of last drive operation. Needed after the AH == 8 call. Uses the BIOS drive number in DL.
@@ -314,7 +323,7 @@ waitkey:
 	jnz short keyhit  ; key was struck
 	cmp bx, [si]  ; check for new time
 	je short waitkey  ; This is a CPU-spinning wait. A `hlt' to wait for a keyboard or timer interrupt would introduce a race condition.
-	loop loadtime  ; wait for timeout to elapse
+	loop loadtime  ; Wait for timeout to elapse. Also does CX -= 1.
 	; Timed out. Fall through to boot_default_partition.
 
 boot_default_partition:
@@ -403,7 +412,7 @@ read_partition_boot_sector_chs:
 	pop ax  ; Restore AL := BIOS drive number; AH := junk.
 	mov ah, dl  ; AH := head value.
 	xchg dx, ax  ; DH := head value; DL := BIOS drive number; AH := 2 (read sectors; AL := 1 (read 1 sector).
-	mov ax, 0x201  ; read one sector. Will be copied to AX by `xchg dx, ax' at 0:BSCODE.
+	mov ax, 0x201  ; AH := 2 (read sectors); AL := 1 (read 1 sector).
 	mov bx, BOOTCODE
 	;mov di, 0
 	;mov es, di  ; ES := 0. Not needed, it's already set. We make ES:BX == 0:BOOTCODE point to the read destination buffer.
