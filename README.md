@@ -20,8 +20,9 @@ BIOS boot. So it runs on most PCs before 2010. Newer PCs tend to use UEFI
 boot instead, some of them still retaining BIOS boot as a configuration
 option, sometimes called as *legacy BIOS* boot.
 
-The askboot implementation [askboot.nasm] is based on WiniBoot by C. E.
-Chew, part of the Minix bootloader ShoeLace 1.0a, released on 1990-04-24.
+The askboot implementation [askboot.nasm](askboot.nasm) is based on WiniBoot
+by C. E. Chew, part of the Minix bootloader ShoeLace 1.0a, released on
+1990-04-24.
 
 See also
 https://en.wikipedia.org/wiki/Master_boot_record#MBR_to_VBR_interface for
@@ -31,7 +32,8 @@ Boot Record, VBR).
 To compile askboot, run: `nasm -O0 -w+orphan-labels -f bin -o askboot.bin
 askboot.nasm`. Minimum NASM version required: 0.98.39. askboot can be
 configured at compile time e.g. with the command-line flage
-`-DTIMEOUT_SEC=3`. See more configuration details in [askboot.nasm].
+`-DTIMEOUT_SEC=3`. See more configuration details in
+[askboot.nasm](askboot.nasm).
 
 To install the compiled *askboot.bin* to a HDD image file hd.img (which
 already contains a valid partition table) on Linux, run `dd if=askboot.bin
