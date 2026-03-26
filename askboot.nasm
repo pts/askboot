@@ -22,6 +22,11 @@
 ; in the partition table entry, and it always uses the partition start
 ; sector index (LBA), even if EBIOS LBA is not available.
 ;
+; askboot can boot on an IBM PC (or compatible) with a 8086 or newer CPU and
+; BIOS boot. So it runs on most PCs before 2010. Newer PCs tend to use UEFI
+; boot instead, some of them still retaining BIOS boot as a configuration
+; option, sometimes called as *legacy BIOS* boot.
+;
 ; See also
 ; https://en.wikipedia.org/wiki/Master_boot_record#MBR_to_VBR_interface for
 ; how this MBR code transfers control to the boot sector boot code (Volume
